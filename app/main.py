@@ -20,7 +20,7 @@ robot_resolver = RobotResolver(urdf)
 points_list = []
 
 # Create initial points
-for _ in tqdm(range(100_00)):
+for _ in tqdm(range(100_000)):
     sample = robot_resolver.sample_end_effector_pos()
     # Its ok if we end up sampling less
     if sample is not None:
@@ -98,21 +98,22 @@ actor_container = {}  # dictionary to hold the active actor reference
 
 # Add the full point cloud initially
 def refresh_opacity(opacity):
-    global clipped
+    global clipped, OPACITY
+    OPACITY = opacity
     plotter.remove_actor(actor_container["actor"], reset_camera=False)
 
     # Add new clipped mesh and store new actor reference
-    new_actor = add_cloud(clipped, opacity)
+    new_actor = add_cloud(clipped)
     actor_container["actor"] = new_actor
 
 
-def add_cloud(cloud, opacity=OPACITY):
+def add_cloud(cloud):
     return plotter.add_mesh(
         cloud,
         render_points_as_spheres=True,
         point_size=5,
         scalars="density [1/m]",
-        opacity=opacity,
+        opacity=OPACITY,
         cmap=CMAP,
     )
 
