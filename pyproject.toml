@@ -7,5 +7,6 @@ requires-python = ">=3.13"
 dependencies = [
     "inquirer>=3.4.0",
     "ipykernel>=6.29.5",
+    "tqdm>=4.67.1",
     "yourdfpy>=0.0.57",
 ]

@@ -1,16 +1,16 @@
 import yourdfpy
-import numpy as np
-from yourdfpy import Joint
-from cli_tools import select_link
-from transform import create_tf
+from transform import RobotResolver
+from tqdm import tqdm
 
 with open("data/gemini.urdf", "r") as f:
     urdf = yourdfpy.urdf.URDF.load(f)
 
+robot_resolver = RobotResolver(urdf)
 
-# Assuming every joint has 100 steps
-steps = 100
-random_steps = tuple(np.random.randint(0, steps, size=5))
+points_list = []
+for _ in tqdm(range(10_000)):
+    if robot_resolver.sample_end_effector() is not None:
+        points_list.append(robot_resolver.sample_end_effector())
 
 
 pass

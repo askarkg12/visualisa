@@ -40,11 +40,11 @@ def rotation_z(angle: float) -> np.ndarray:
 def rotation_xyz(axis: np.ndarray, angle: float) -> np.ndarray:
     r = np.eye(4)
     if axis[0] != 0:
-        r = r @ rotation_x(axis[0])
+        r = r @ rotation_x(axis[0] * angle)
     if axis[1] != 0:
-        r = r @ rotation_y(axis[1])
+        r = r @ rotation_y(axis[1] * angle)
     if axis[2] != 0:
-        r = r @ rotation_z(axis[2])
+        r = r @ rotation_z(axis[2] * angle)
     return r
 
 
@@ -63,7 +63,7 @@ def create_tf(joint: Joint, discrete_step: float, total_steps: int = 360) -> np.
     if joint.type == "fixed":
         return t_fixed
     elif joint.type == "revolute":
-        return (rotation_xyz(joint.axis, joint_value) @ t_fixed).astype(np.float32)
+        return t_fixed @ rotation_xyz(joint.axis, joint_value)
     elif joint.type == "prismatic":
         raise NotImplementedError("Prismatic joints are not supported")
     else:
@@ -71,23 +71,39 @@ def create_tf(joint: Joint, discrete_step: float, total_steps: int = 360) -> np.
 
 
 class RobotResolver:
-    def __init__(self, urdf: URDF):
+    def __init__(self, urdf: URDF, joint_steps: list[int] | int | None = None):
         self.urdf = urdf
+        if joint_steps is None:
+            self.joint_steps = [100] * len(self.urdf.robot.joints)
+        elif isinstance(joint_steps, int):
+            self.joint_steps = [joint_steps] * len(self.urdf.robot.joints)
+        elif isinstance(joint_steps, list):
+            self.joint_steps = joint_steps
+        else:
+            raise ValueError("Invalid joint steps")
         base_link_name = self.urdf.base_link
 
         links = {link.name: link for link in self.urdf.robot.links}
         ef_link = select_link(list(links.values()))
-        base_link = links[base_link_name]
 
-        child_2_joints: dict[str, Joint] = {
-            joint.child: joint for joint in self.urdf.robot.joints
-        }
+        child_2_joints: dict[str, Joint] = {joint.child: joint for joint in self.urdf.robot.joints}
 
         # Build chain from EF link to base link
-        joint_chain: list[Joint] = [child_2_joints[ef_link.name]]
+        self.joint_chain: list[Joint] = [child_2_joints[ef_link.name]]
 
-        while joint_chain[-1].parent != base_link_name:
-            joint_chain.append(child_2_joints[joint_chain[-1].parent])
+        while self.joint_chain[0].parent != base_link_name:
+            self.joint_chain.insert(0, child_2_joints[self.joint_chain[0].parent])
+
+        self.resolve_chains: set[tuple[int]] = set()
+
+    def sample_end_effector(self) -> list[float] | None:
+        steps = tuple(np.random.randint(0, self.joint_steps).tolist())
+        if steps in self.resolve_chains:
+            return None
+        self.resolve_chains.add(steps)
+        tf = self.resolve_chain(steps)
+        xyz = tf[:3, 3]
+        return xyz.tolist()
 
     @property
     def joints(self) -> list[Joint]:
@@ -99,10 +115,22 @@ class RobotResolver:
         self.resolve_chain.cache_clear()
 
     @cache
-    def resolve_chain(self, discrete_steps: tuple[int] | int) -> list[np.ndarray]:
+    def resolve_chain(self, discrete_steps: tuple[int] | int) -> np.ndarray:
+        if len(discrete_steps) > len(self.joint_chain):
+            raise ValueError("Too many discrete steps")
         if len(discrete_steps) == 0:
-            return [np.eye(4)]
-        else:
-            return self.resolve_chain(discrete_steps[1:]) @ create_tf(
-                self.joints[discrete_steps[0]], discrete_steps[0]
+            return np.eye(4)
+        elif len(discrete_steps) == 1:
+            return create_tf(
+                self.joint_chain[len(discrete_steps) - 1],
+                discrete_steps[0],
+                self.joint_steps[len(discrete_steps) - 1],
             )
+        else:
+            chain = self.resolve_chain(discrete_steps[:-1])
+            tf = create_tf(
+                self.joint_chain[len(discrete_steps) - 1],
+                discrete_steps[-1],
+                self.joint_steps[len(discrete_steps) - 1],
+            )
+            return chain @ tf
