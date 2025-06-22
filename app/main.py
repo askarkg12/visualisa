@@ -91,6 +91,7 @@ populate_plotter_with_robot(plotter, robot_resolver)
 
 
 actor_container = {}  # dictionary to hold the active actor reference
+active_clip_box = None
 
 
 # Add the full point cloud initially
@@ -105,12 +106,18 @@ def refresh_opacity(opacity):
     actor_container["actor"] = new_actor
 
 
-def add_cloud(cloud: pv.PolyData):
+def add_cloud(cloud: pv.PolyData | pv.UnstructuredGrid):
+    if isinstance(cloud, pv.UnstructuredGrid):
+        cloud_pv = pv.PolyData(cloud.points)
+        cloud_pv["density [1/m]"] = cloud["density [1/m]"]
+        cloud = cloud_pv
+
     if cloud.n_points == 0:
         return None
     return plotter.add_mesh(
         cloud,
-        render_points_as_spheres=True,
+        # render_points_as_spheres=True,
+        style="points_gaussian",
         point_size=5,
         scalars="density [1/m]",
         opacity=OPACITY,
@@ -127,11 +134,13 @@ plotter.add_axes()
 
 # Step 5: Define clipping callback
 def clip_with_box(box):
-    global clipped
+    global clipped, active_clip_box
+    active_clip_box = box
     clipped = cloud.clip_box(box, invert=False)
 
     # Remove previous actor
-    plotter.remove_actor(actor_container["actor"], reset_camera=False)
+    if "actor" in actor_container and actor_container["actor"] is not None:
+        plotter.remove_actor(actor_container["actor"], reset_camera=False)
 
     # Add new clipped mesh and store new actor reference
     new_actor = add_cloud(clipped)
@@ -139,7 +148,7 @@ def clip_with_box(box):
 
 
 def update_cloud():
-    global points, cloud, clipped, tree, actor_container, k
+    global points, cloud, clipped, tree, actor_container, k, active_clip_box
     new_points = []
     while not points_queue.empty():
         try:
@@ -159,10 +168,14 @@ def update_cloud():
 
     cloud = pv.PolyData(points)
     cloud["density [1/m]"] = density
-    clipped = cloud
+
+    if active_clip_box is not None:
+        clipped = cloud.clip_box(active_clip_box, invert=False)
+    else:
+        clipped = cloud
 
     plotter.remove_actor(actor_container["actor"], reset_camera=False)
-    actor_container["actor"] = add_cloud(cloud)
+    actor_container["actor"] = add_cloud(clipped)
 
 
 def foo(flag):
