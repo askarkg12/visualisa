@@ -1,35 +1,82 @@
-from yourdfpy import Link
-import random
 import pyvista as pv
+import os
+import sys
+import time
 import yourdfpy
 import numpy as np
 from transform import RobotResolver
 from tqdm import tqdm
+from scipy.spatial import KDTree
+from urdf_vis import populate_plotter_with_robot
 import threading
-from scipy.spatial import cKDTree
+import queue
+from pyvistaqt import BackgroundPlotter
+import psutil
 
 CMAP = "plasma"
 OPACITY = 0.7
+THROTTLE_MULT = 1
 
+points_queue = queue.Queue()
 
 with open("data/gemini.urdf", "r") as f:
     urdf = yourdfpy.urdf.URDF.load(f)
 
 robot_resolver = RobotResolver(urdf)
 
+
+def set_priority(priority: str = "low"):
+    try:
+        if sys.platform.startswith("win"):
+            p = psutil.Process()
+            if priority == "low":
+                p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+            elif priority == "normal":
+                p.nice(psutil.NORMAL_PRIORITY_CLASS)
+            elif priority == "high":
+                p.nice(psutil.HIGH_PRIORITY_CLASS)
+        else:
+            if priority == "low":
+                os.nice(10)
+            elif priority == "normal":
+                os.nice(5)
+            elif priority == "high":
+                os.nice(0)
+    except ImportError:
+        pass
+
+
+def background_worker(q: queue.Queue):
+    set_priority("low")
+    for _ in tqdm(range(500_000)):
+        start = time.perf_counter()
+        sample = robot_resolver.sample_end_effector_pos()
+        duration = time.perf_counter() - start
+        if sample is not None:
+            q.put(sample)
+
+        time.sleep(duration * THROTTLE_MULT)
+
+
+worker_thread = threading.Thread(target=background_worker, args=(points_queue,), daemon=True)
+worker_thread.start()
+
 points_list = []
 
 # Create initial points
-for _ in tqdm(range(100_000)):
+for _ in tqdm(range(1_000)):
     sample = robot_resolver.sample_end_effector_pos()
     # Its ok if we end up sampling less
     if sample is not None:
         points_list.append(sample)
 
-points = np.array(points_list)
+if points_list:
+    points = np.array(points_list)
+else:
+    points = np.empty((0, 3))
 
 
-tree = cKDTree(points)
+tree = KDTree(points)
 k = 20
 distances, _ = tree.query(points, k=k)
 density = 1.0 / (np.mean(distances[:, 1:], axis=1) + 1e-8)
@@ -39,58 +86,8 @@ clipped = cloud
 
 # Plot the robot in 3D
 
-colours = [
-    "red",
-    "green",
-    "blue",
-    "yellow",
-    "purple",
-    "orange",
-    "pink",
-    "brown",
-    "gray",
-    "cyan",
-    "magenta",
-    "lime",
-]
-
-plotter = pv.Plotter()
-for link in robot_resolver.urdf.robot.links:
-    link: Link
-    if link.visuals is not None:
-        for visual in link.visuals:
-            if visual.geometry is not None:
-                if visual.geometry.box is not None:
-                    bounds = np.empty(6)
-                    bounds[0::2] = -visual.geometry.box.size / 2
-                    bounds[1::2] = visual.geometry.box.size / 2
-                    mesh = pv.Box(bounds)
-
-                    # Resolve transform from visual to link
-                    if visual.origin is None:
-                        box_to_link = np.eye(4)
-                    else:
-                        box_to_link = visual.origin
-
-                    # Resolve link to base_link
-                    if link.name == "base_link":
-                        link_to_base = np.eye(4)
-                    else:
-                        # create chain for this link
-                        chain = []
-                        for joint in robot_resolver.joints:
-                            chain.append(joint)
-                            if joint.child == link.name:
-                                break
-                        link_to_base = robot_resolver.resolve_chain_rad(
-                            [0] * len(chain)
-                        )
-
-                    # Combine transforms
-                    tf = link_to_base @ box_to_link
-                    mesh.transform(tf)
-
-                    plotter.add_mesh(mesh, color=random.choice(colours))
+plotter = BackgroundPlotter()
+populate_plotter_with_robot(plotter, robot_resolver)
 
 
 actor_container = {}  # dictionary to hold the active actor reference
@@ -100,6 +97,7 @@ actor_container = {}  # dictionary to hold the active actor reference
 def refresh_opacity(opacity):
     global clipped, OPACITY
     OPACITY = opacity
+
     plotter.remove_actor(actor_container["actor"], reset_camera=False)
 
     # Add new clipped mesh and store new actor reference
@@ -107,7 +105,9 @@ def refresh_opacity(opacity):
     actor_container["actor"] = new_actor
 
 
-def add_cloud(cloud):
+def add_cloud(cloud: pv.PolyData):
+    if cloud.n_points == 0:
+        return None
     return plotter.add_mesh(
         cloud,
         render_points_as_spheres=True,
@@ -138,28 +138,46 @@ def clip_with_box(box):
     actor_container["actor"] = new_actor
 
 
-def background_worker():
-    global points, cloud
+def update_cloud():
+    global points, cloud, clipped, tree, actor_container, k
+    new_points = []
+    while not points_queue.empty():
+        try:
+            new_points.append(points_queue.get_nowait())
+        except queue.Empty:
+            break
 
-    points_buffer = []
+    if not new_points:
+        return
 
-    for _ in range(10_000_000):
-        sample = robot_resolver.sample_end_effector_pos()
-        # Its ok if we end up sampling less
-        if sample is not None:
-            points_buffer.append(sample)
+    new_points = np.array(new_points)
+    points = np.concatenate([points, new_points])
 
-        if len(points_buffer) % 30_000 == 0:
-            points = np.concatenate([points, np.array(points_buffer)])
-            points_buffer = []
-            cloud = pv.PolyData(points)
+    tree = KDTree(points)
+    distances, _ = tree.query(points, k=k)
+    density = 1.0 / (np.mean(distances[:, 1:], axis=1) + 1e-8)
+
+    cloud = pv.PolyData(points)
+    cloud["density [1/m]"] = density
+    clipped = cloud
+
+    plotter.remove_actor(actor_container["actor"], reset_camera=False)
+    actor_container["actor"] = add_cloud(cloud)
 
 
-# threading.Thread(target=background_worker).start()
+def foo(flag):
+    update_cloud()
+
+
+def update_throttle(value):
+    global THROTTLE_MULT
+    THROTTLE_MULT = value
+
 
 # Step 6: Enable interactive box widget
-plotter.add_box_widget(
-    callback=clip_with_box, bounds=cloud.bounds, rotation_enabled=False
-)
-plotter.add_slider_widget(refresh_opacity, [0, 1], value=OPACITY, title="Opacity")
-plotter.show()
+plotter.add_box_widget(callback=clip_with_box, bounds=cloud.bounds, rotation_enabled=False)
+plotter.add_slider_widget(update_throttle, [0.001, 10], value=THROTTLE_MULT, title="Throttle")
+plotter.add_checkbox_button_widget(callback=foo, value=True)
+# plotter.add_timer_event(callback=update_cloud, duration=3000, max_steps=10)
+
+plotter.app.exec()
