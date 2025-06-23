@@ -1,4 +1,4 @@
-# visualisa
+# kinematic-viz
 
 Simple visualiser for URDFs reach via point clouds. It's WIP, but usable even at this point.
 
