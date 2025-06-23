@@ -66,10 +66,10 @@ worker_thread.start()
 points_list = []
 
 # Create initial points
-# for _ in tqdm(range(1_000)):
-#     sample = robot_resolver.sample_end_effector_pos()
-#     if sample is not None:
-#         points_list.append(sample)
+for _ in tqdm(range(100)):
+    sample = robot_resolver.sample_end_effector_pos()
+    if sample is not None:
+        points_list.append(sample)
 
 if points_list:
     points = np.array(points_list)
