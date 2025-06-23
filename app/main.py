@@ -12,6 +12,8 @@ import threading
 import queue
 from pyvistaqt import BackgroundPlotter
 import psutil
+from PySide6.QtWidgets import QMainWindow
+
 
 CMAP = "plasma"
 OPACITY = 0.7
@@ -64,11 +66,10 @@ worker_thread.start()
 points_list = []
 
 # Create initial points
-for _ in tqdm(range(1_000)):
-    sample = robot_resolver.sample_end_effector_pos()
-    # Its ok if we end up sampling less
-    if sample is not None:
-        points_list.append(sample)
+# for _ in tqdm(range(1_000)):
+#     sample = robot_resolver.sample_end_effector_pos()
+#     if sample is not None:
+#         points_list.append(sample)
 
 if points_list:
     points = np.array(points_list)
@@ -84,29 +85,25 @@ cloud = pv.PolyData(points)
 cloud["density [1/m]"] = density
 clipped = cloud
 
-# Plot the robot in 3D
 
-plotter = BackgroundPlotter()
+plotter = BackgroundPlotter(show=True)
 populate_plotter_with_robot(plotter, robot_resolver)
 
 
-actor_container = {}  # dictionary to hold the active actor reference
+actor_containers = {}
 active_clip_box = None
 
 
-# Add the full point cloud initially
 def refresh_opacity(opacity):
     global clipped, OPACITY
     OPACITY = opacity
 
-    plotter.remove_actor(actor_container["actor"], reset_camera=False)
-
-    # Add new clipped mesh and store new actor reference
-    new_actor = add_cloud(clipped)
-    actor_container["actor"] = new_actor
+    refresh_cloud(clipped)
 
 
-def add_cloud(cloud: pv.PolyData | pv.UnstructuredGrid):
+def refresh_cloud(cloud: pv.PolyData | pv.UnstructuredGrid):
+    if "cloud" in actor_containers and actor_containers["cloud"] is not None:
+        plotter.remove_actor(actor_containers["cloud"], reset_camera=False)
     if isinstance(cloud, pv.UnstructuredGrid):
         cloud_pv = pv.PolyData(cloud.points)
         cloud_pv["density [1/m]"] = cloud["density [1/m]"]
@@ -114,7 +111,7 @@ def add_cloud(cloud: pv.PolyData | pv.UnstructuredGrid):
 
     if cloud.n_points == 0:
         return None
-    return plotter.add_mesh(
+    new_actor = plotter.add_mesh(
         cloud,
         # render_points_as_spheres=True,
         style="points_gaussian",
@@ -123,32 +120,25 @@ def add_cloud(cloud: pv.PolyData | pv.UnstructuredGrid):
         opacity=OPACITY,
         cmap=CMAP,
     )
+    actor_containers["cloud"] = new_actor
 
 
-actor = add_cloud(cloud)
-actor_container["actor"] = actor  # store reference for later replacement
+refresh_cloud(cloud)
 
 plotter.add_axes()
-# plotter.add_title("Point Cloud Density with Interactive Section Box")
 
 
-# Step 5: Define clipping callback
 def clip_with_box(box):
+    update_cloud_from_queue()
     global clipped, active_clip_box
     active_clip_box = box
     clipped = cloud.clip_box(box, invert=False)
 
-    # Remove previous actor
-    if "actor" in actor_container and actor_container["actor"] is not None:
-        plotter.remove_actor(actor_container["actor"], reset_camera=False)
-
-    # Add new clipped mesh and store new actor reference
-    new_actor = add_cloud(clipped)
-    actor_container["actor"] = new_actor
+    refresh_cloud(clipped)
 
 
-def update_cloud():
-    global points, cloud, clipped, tree, actor_container, k, active_clip_box
+def update_cloud_from_queue(_=None):
+    global points, cloud, clipped, tree, actor_containers, k, active_clip_box
     new_points = []
     while not points_queue.empty():
         try:
@@ -174,12 +164,7 @@ def update_cloud():
     else:
         clipped = cloud
 
-    plotter.remove_actor(actor_container["actor"], reset_camera=False)
-    actor_container["actor"] = add_cloud(clipped)
-
-
-def foo(flag):
-    update_cloud()
+    refresh_cloud(clipped)
 
 
 def update_throttle(value):
@@ -187,10 +172,33 @@ def update_throttle(value):
     THROTTLE_MULT = value
 
 
-# Step 6: Enable interactive box widget
-plotter.add_box_widget(callback=clip_with_box, bounds=cloud.bounds, rotation_enabled=False)
+plotter.add_box_widget(
+    callback=clip_with_box,
+    bounds=cloud.bounds if cloud.n_points > 0 else None,
+    rotation_enabled=False,
+)
 plotter.add_slider_widget(update_throttle, [0.001, 10], value=THROTTLE_MULT, title="Throttle")
-plotter.add_checkbox_button_widget(callback=foo, value=True)
-# plotter.add_timer_event(callback=update_cloud, duration=3000, max_steps=10)
+
+# Let system autopopulate the cloud for first 5 seconds
+plotter.add_callback(update_cloud_from_queue, interval=500, count=30)
+
+# main_window = QMainWindow()
+# main_window.setCentralWidget(plotter)
+# main_window.setWindowTitle("Point Cloud Density with Interactive Section Box")
+
+
+menu_bar = plotter.main_menu
+
+
+def foo():
+    print("foo")
+
+
+action_menu = menu_bar.addMenu("Actions")
+foo_action = action_menu.addAction("Foo")
+foo_action.triggered.connect(foo)
+
+# main_window.show()
+
 
 plotter.app.exec()
